@@ -1,3 +1,10 @@
+# xhost + && sudo docker run -it --privileged -v /dev/bus/usb:/dev/bus/usb -v /tmp/.X11-unix/:/tmp/.X11-unix -v /home/yufan/Codes/EDOPT/EDOPT:/usr/local/src/EDOPT_Yufan -e DISPLAY=unix$DISPLAY --network host --gpus all sixdof:latest
+# xhost + && sudo docker run -it --privileged -v /dev/bus/usb:/dev/bus/usb -v /tmp/.X11-unix/:/tmp/.X11-unix -e DISPLAY=unix$DISPLAY --network host --gpus all sixdof:latest
+# xhost + && sudo docker run -it --privileged -v /dev/bus/usb:/dev/bus/usb -v /tmp/.X11-unix/:/tmp/.X11-unix -e DISPLAY=unix$DISPLAY --network host --gpus all -v /home/yufan/Related/Dependency/EDOPT:/app sixdof:latest
+#                                                                                                                                                                                                     :/usr/local/src/EDOPT
+#cd /usr/local/src/EDOPT/code/build/
+
+
 #FROM ubuntu:20.04
 FROM nvidia/opengl:1.2-glvnd-devel-ubuntu20.04
 ENV DEBIAN_FRONTEND noninteractive
@@ -76,19 +83,20 @@ RUN cd $CODE_DIR &&\
 # set github ssh keys #
 #######################
 
-RUN apt install -y \
-    openssh-client git \
-    libmysqlclient-dev \
-    libsm6 libxext6
+# RUN apt install -y \
+#     openssh-client git \
+#     libmysqlclient-dev \
+#     libsm6 libxext6
 
-# Authorize SSH Host
-RUN mkdir -p /root/.ssh && \
-    chmod 0700 /root/.ssh
-RUN ssh-keyscan github.com > /root/.ssh/known_hosts
+# # Authorize SSH Host
+# RUN mkdir -p /root/.ssh && \
+#     chmod 0700 /root/.ssh
+# RUN ssh-keyscan github.com > /root/.ssh/known_hosts
 
 ARG GIT_BRANCH=main
-RUN --mount=type=ssh cd $CODE_DIR &&\
-    git clone git@github.com:event-driven-robotics/EDOPT.git &&\
+# RUN --mount=type=ssh cd $CODE_DIR &&\
+RUN cd $CODE_DIR &&\
+    git clone https://github.com/event-driven-robotics/EDOPT.git &&\
     cd EDOPT &&\
     git checkout $GIT_BRANCH
 
