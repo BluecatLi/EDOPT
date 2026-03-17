@@ -103,6 +103,10 @@ public:
 
         if(!loadPose(rf, "object_pose", initial_state)) return false;
         if(!loadPose(rf, "camera_pose", camera_pose)) return false;
+        // // 统一化：如果 ORFCV 的 y 和 z 与 EDOPT 渲染器相反
+        // camera_pose[1] *= -1.0; // 翻转 y
+        // camera_pose[2] *= -1.0; // 翻转 z
+        // // 对应四元数也需要根据坐标系旋转进行修正
         state = initial_state;
         
         if(!Network::checkNetwork(1.0)) {
@@ -110,7 +114,7 @@ public:
             return false;
         }
 
-        if (!eros_handler.start(cv::Size(intrinsic_parameters.find("w").asInt32(), intrinsic_parameters.find("h").asInt32()), "/atis3/AE:o", getName("/AE:i"), eros_k, eros_d)) {
+        if (!eros_handler.start(cv::Size(intrinsic_parameters.find("w").asInt32(), intrinsic_parameters.find("h").asInt32()), "/atis4/AE:o", getName("/AE:i"), eros_k, eros_d)) {
             yError() << "could not open the YARP eros handler";
             return false;
         }
@@ -660,7 +664,7 @@ int main(int argc, char* argv[])
 {
     tracker my_tracker;
     ResourceFinder rf;
-    rf.setDefaultConfigFile("/usr/local/src/EDOPT/configCAR.ini");
+    rf.setDefaultConfigFile("/usr/local/src/EDOPT/configCHEEZIT.ini");
     rf.configure(argc, argv);
     
     return my_tracker.runModule(rf);
