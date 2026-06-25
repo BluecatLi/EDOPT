@@ -9,6 +9,11 @@
 // #include <yarp/rosmsg/std_msgs/Int64.h>
 // #include <yarp/rosmsg/geometry_msgs/Pose.h>
 #include <yarp/rosmsg/SharedData.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cstring>
+#include <cstdint>
 
 using yarp::os::Network;
 using yarp::os::Node;
@@ -23,7 +28,8 @@ class YarpToRos
 {
 
 private:
-
+    int udp_sock_ = -1;
+    struct sockaddr_in udp_addr_;
 public:
 
     // yarp::os::Publisher<yarp::rosmsg::geometry_msgs::Pose> publisher;
@@ -35,49 +41,35 @@ public:
 
     yarp::rosmsg::SharedData d;
 
-    void initPublisher(){
-       // Network yarp;
-        /* creates a node called /yarp/talker */
-        node = new yarp::os::Node("/yarp/talker");
-
-       if (!port.topic("foo2/sharedmessage"))              // replaced open() with topic()
-       {
-           yCError(TALKER) << "Failed to create publisher to /position";
-       }
-
-        /* subscribe to topic chatter */
-        // if (!publisher.topic("/star_position")) {
-        //     yCError(TALKER) << "Failed to create publisher to /catcher/event/object_position";
-        // }
+void initPublisher(){
+        // UDP socket -> ROS2 receiver (twist_bridge_receiver.py listening on 9870)
+        udp_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if(udp_sock_ < 0) {
+            yCError(TALKER) << "Failed to create UDP socket";
+            return;
+        }
+        memset(&udp_addr_, 0, sizeof(udp_addr_));
+        udp_addr_.sin_family = AF_INET;
+        udp_addr_.sin_port = htons(9870);
+        // NOTE: target IP. See the cross-container note below.
+        inet_pton(AF_INET, "127.0.0.1", &udp_addr_.sin_addr);
+        yInfo() << "UDP pose sender initialised -> 127.0.0.1:9870";
     }
 
     void publishTargetPos(double x, double y, double z, double qx, double qy, double qz, double qw){
-
-        d.content.push_back(x);
-        d.content.push_back(y);
-        d.content.push_back(z);
-        d.content.push_back(qx);
-        d.content.push_back(qy);
-        d.content.push_back(qz);
-        d.content.push_back(qw);
-        yInfo()<<d.content;
-        // std::cout<<std::endl; 
-
-        port.write(d);
-
-        d.content.clear();
-
-        /* publish it to the topic */
-        // publisher.write(data);
+        if(udp_sock_ < 0) return;
+        // bridge expects 6 doubles: [tx, ty, tz, qx, qy, qz] in METERS.
+        // qw is reconstructed on the receiver side as sqrt(1 - qx^2-qy^2-qz^2),
+        // so the quaternion MUST be normalized before sending.
+        double buf[6] = { x, y, z, qx, qy, qz };
+        sendto(udp_sock_, buf, sizeof(buf), 0,
+               (struct sockaddr*)&udp_addr_, sizeof(udp_addr_));
     }
 
-    ~YarpToRos()
+~YarpToRos()
     {
-        if (node)
-        {
-            delete node;
-            node = nullptr;
-        }
+        if(udp_sock_ >= 0) { close(udp_sock_); udp_sock_ = -1; }
+        if (node) { delete node; node = nullptr; }
     }
 
 };

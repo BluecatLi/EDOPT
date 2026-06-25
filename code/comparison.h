@@ -270,31 +270,73 @@ public:
             if(w.active) w.score = similarity_score(proc_obs, w.img_warp);
     }
 
-    void update_state(const warp_bundle &best)
+    // apply a continuous delta (same units as warp.delta) on one axis,
+    // using the exact same per-axis conversion as the discrete update.
+    void apply_axis_delta(int axis, double delta)
     {
         double d = fabs(state_current[z]);
-        switch(best.axis) {
-            case(x):
-                state_current[best.axis] += best.delta * scale * d / cam[fx];
-                break;
-            case(y):
-                state_current[best.axis] += best.delta * scale * d / cam[fy];
-                break;
-            case(z):
-                state_current[best.axis] += best.delta * d;
-                break;
-            case(a):
-                perform_rotation(state_current, 0, best.delta);
-                break;
-            case(b):
-                perform_rotation(state_current, 1, best.delta);
-                break;
-            case(c):
-                perform_rotation(state_current, 2, best.delta);
-                break;
+        switch(axis) {
+            case(x): state_current[x] += delta * scale * d / cam[fx]; break;
+            case(y): state_current[y] += delta * scale * d / cam[fy]; break;
+            case(z): state_current[z] += delta * d;                   break;
+            case(a): perform_rotation(state_current, 0, delta);       break;
+            case(b): perform_rotation(state_current, 1, delta);       break;
+            case(c): perform_rotation(state_current, 2, delta);       break;
         }
+    }
+
+    void update_state(const warp_bundle &best)
+    {
+        apply_axis_delta(best.axis, best.delta);
         //cv::remap(projection.img_warp, projection.img_warp, best.rmp, best.rmsp, cv::INTER_LINEAR);
         //warp_history.push_back(&best);
+    }
+
+    // Continuous variable-magnitude step per axis, from the already-computed
+    // scores s(0)=projection.score, s(+/-delta)=warps[p/n].score.
+    //  - concave (peak bracketed): damped-Newton parabola-vertex step
+    //  - non-concave (still climbing => object moved far): saturated trust step
+    // This removes the fixed +/-1px cap that causes the fast-motion staircase.
+    bool update_parabolic(double lambda = 1e-3, double trust = 3.0, double eps = 0.02)
+    {
+        struct Ax { int axis; int p; int n; };
+        static const Ax axes[6] = {
+            {x, xp, xn}, {y, yp, yn}, {z, zp, zn},
+            {a, ap, an}, {b, bp, bn}, {c, cp, cn}
+        };
+        bool updated = false;
+        double s0 = projection.score;
+        for (const auto &ax : axes) {
+            if (!warps[ax.p].active || !warps[ax.n].active) continue;
+            double sp = warps[ax.p].score;
+            double sn = warps[ax.n].score;
+            double D  = warps[ax.p].delta;            // +base step (axis units)
+            if (D == 0.0) continue;
+
+            double concav = 2.0*s0 - sp - sn;         // >0 => concave peak
+            double grad   = sp - sn;                  // ascent direction sign
+
+            // deadband: ignore axes whose +/- scores differ only by noise.
+            // scale threshold by the local score level so it adapts to event rate.
+            double ref = (s0 > 0.0 ? s0 : 0.5*(sp+sn));
+            double grad_thresh = eps * (ref > 0.0 ? ref : 1.0);
+            if (fabs(grad) < grad_thresh) continue;   // no reliable signal -> hold
+
+            double step;
+            if (concav > 1e-9) {
+                step = D * grad / (2.0*concav + lambda);   // Newton vertex
+            } else {
+                step = (grad > 0 ? 1.0 : -1.0) * trust * D; // saturate (signal already passed deadband)
+            }
+            double R = trust * fabs(D);                // trust-region clamp
+            if (step >  R) step =  R;
+            if (step < -R) step = -R;
+            if (fabs(step) < 1e-6 * fabs(D)) continue; // negligible
+
+            apply_axis_delta(ax.axis, step);
+            updated = true;
+        }
+        return updated;
     }
 
     bool update_all_possible()

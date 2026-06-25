@@ -87,3 +87,76 @@ gh auth login
   - ! First copy your one-time code: XXXX-XXX
   - Open this link [https://github.com/login/device](https://github.com/login/device)
   - In the web browser, input one-time code to login
+
+  ## Running EDOPT on recorded data (yarpdataplayer)
+
+### One-time setup
+- Recorded data lives in a folder containing `data.log` + `info.log`
+  (e.g. `code/build/data/`). The source port is `/atis4/AE:o`.
+- EDOPT's input port is `/ekom/AE:i` (set by `setName("/ekom")`).
+
+### Each run (4 terminals)
+
+1. **Start the YARP server**
+```bash
+   yarpserver
+```
+
+2. **Start EDOPT**
+```bash
+   cd code/build
+   ./edopt --file run_name            # add --cstep for continuous-step version
+```
+   - This opens the input port `/ekom/AE:i`.
+   - `--file run_name` logs the pose trajectory to `run_name` (+ `run_name.mp4`).
+   - Press **G** in the SCARF window to start tracking; **P** prints the
+     current pose in config format; **space** resets to initial pose.
+
+3. **Start yarpdataplayer and load data**
+```bash
+   yarpdataplayer
+```
+   - `File → Open Directory` → select the **parent** folder of `data/`
+     (NOT the `data` folder itself, NOT `data.log`).
+   - A row with port `/atis4/AE:o` should appear. Do **not** press play yet.
+
+4. **Connect the ports**
+```bash
+   yarp connect /atis4/AE:o /ekom/AE:i fast_tcp
+```
+   Verify:
+```bash
+   yarp name list | grep -E "atis4|ekom"     # both ports must exist
+   yarp connect list | grep ekom             # connection must be listed
+```
+
+5. **Press play** in yarpdataplayer, then **press G** in the EDOPT window.
+
+### Notes / gotchas
+- Order matters: load data → connect → play. Re-opening data in
+  yarpdataplayer recreates `/atis4/AE:o`, which **breaks the connection** —
+  reconnect (step 4) after any stop/reload.
+- To auto-reconnect, make the connection persistent:
+```bash
+  yarp connect /atis4/AE:o /ekom/AE:i fast_tcp --persist
+```
+- The camera calibration in the `.ini` must match the recording
+  (ATIS4 = 640x480). A wrong `w/h/fx/...` makes the projection misalign
+  and tracking fail silently.
+- If yarpdataplayer crashes on opening a directory:
+```bash
+  pkill -9 yarpdataplayer && yarp clean --timeout 0.5
+```
+  or copy `data.log`+`info.log` into a clean isolated folder and open that.
+
+### Plotting the logged trajectory
+```bash
+python3 plot_edopt_poses.py run_baseline run_cstep --save compare.png
+```
+
+### CLI flags
+- `--cstep` : continuous variable-magnitude update (vs fixed discrete step)
+- `--cstep_trust <f>` : trust-region size, x base step (default 3.0; try 1.0–1.5)
+- `--cstep_eps <f>` : static-state deadband, relative to score (default 0.02)
+- `--predict` : motion prediction (tested, no benefit at high rate — leave off)
+- `--parallel` : threaded projection path (sequential is default)
