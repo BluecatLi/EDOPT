@@ -56,6 +56,7 @@ private:
 
     //--- continuous variable-magnitude step ---
     bool cstep{false};            // --cstep : use parabolic/Newton update
+    bool cpair{false};            // --cpair : coupled 2D quadratic
     double cstep_lambda{1e-3};    // --cstep_lambda : Newton damping
     double cstep_trust{3.0};      // --cstep_trust : trust-region (x base step)
     double cstep_eps{0.02};       // --cstep_eps : relative gradient deadband
@@ -96,6 +97,7 @@ public:
         cstep_lambda = rf.check("cstep_lambda", Value(1e-3)).asFloat64();
         cstep_trust = rf.check("cstep_trust", Value(3.0)).asFloat64();
         cstep_eps = rf.check("cstep_eps", Value(0.02)).asFloat64();
+        cpair = rf.check("cpair") && rf.check("cpair", Value(true)).asBool();
 
         yarp::os::Bottle& intrinsic_parameters = rf.findGroup("CAMERA_CALIBRATION");
         if (intrinsic_parameters.isNull()) {
@@ -340,7 +342,8 @@ public:
             if (run) {
                 // warp_handler.update_from_max();
                 // warp_handler.update_all_possible();
-                updated = cstep ? warp_handler.update_parabolic(cstep_lambda, cstep_trust, cstep_eps)
+                updated = cpair ? warp_handler.update_parabolic_coupled(cstep_lambda, cstep_trust, cstep_eps)
+                        : cstep ? warp_handler.update_parabolic(cstep_lambda, cstep_trust, cstep_eps)
                                 : warp_handler.update_heuristically();
                 //updated = warp_handler.update_from_max();
                 // state = warp_handler.state_current;
@@ -420,7 +423,8 @@ public:
             if(run) {
                 //updated = warp_handler.update_from_max();
                 //updated = warp_handler.update_all_possible();
-                updated = cstep ? warp_handler.update_parabolic(cstep_lambda, cstep_trust, cstep_eps)
+                updated = cpair ? warp_handler.update_parabolic_coupled(cstep_lambda, cstep_trust, cstep_eps)
+                        : cstep ? warp_handler.update_parabolic(cstep_lambda, cstep_trust, cstep_eps)
                                 : warp_handler.update_heuristically();
                 state = warp_handler.state_current;
                 ros_publish.publishTargetPos(warp_handler.state_current[0],

@@ -256,11 +256,11 @@ public:
         warp_history.clear();
     }
 
-    double similarity_score(const cv::Mat &observation, const cv::Mat &expectation) {
-        static cv::Mat muld;
-        muld = expectation.mul(observation);
-        return cv::sum(cv::sum(muld))[0];
-    }
+    double similarity_score(const cv::Mat &O, const cv::Mat &E) {
+    double dot = cv::sum(E.mul(O))[0];
+    double ne  = cv::norm(E);              // 每个模板的能量,可缓存
+    return ne > 1e-9 ? std::max(0.0, dot / ne) : 0.0;
+}
 
     void score_predictive_warps()
     {
@@ -335,6 +335,122 @@ public:
 
             apply_axis_delta(ax.axis, step);
             updated = true;
+        }
+        return updated;
+    }
+    // ---- 1D parabolic step (exact same logic as update_parabolic, factored out) ----
+    bool parabolic_step_1d(double s0, double sp, double sn, double D,
+                           double lambda, double trust, double eps, double &step)
+    {
+        if (D == 0.0) return false;
+        double concav = 2.0*s0 - sp - sn;
+        double grad   = sp - sn;
+        double ref = (s0 > 0.0 ? s0 : 0.5*(sp+sn));
+        double grad_thresh = eps * (ref > 0.0 ? ref : 1.0);
+        if (fabs(grad) < grad_thresh) return false;
+        if (concav > 1e-9) step = D * grad / (2.0*concav + lambda);
+        else               step = (grad > 0 ? 1.0 : -1.0) * trust * D;
+        double R = trust * fabs(D);
+        if (step >  R) step =  R;
+        if (step < -R) step = -R;
+        if (fabs(step) < 1e-6 * fabs(D)) return false;
+        return true;
+    }
+
+    // ---- corner score s(+d_affine, +d_rot): apply the affine axis' +delta remap
+    //      to the already-rendered +delta rotation template, then score. ----
+    //      NOTE: sequential_loop only (needs rendered a/b templates in warps[ap/bp]).
+    double score_corner(int affine_pos, int rendered_pos)
+    {
+        static cv::Mat corner;
+        cv::remap(warps[rendered_pos].img_warp, corner,
+                  warps[affine_pos].rmp, warps[affine_pos].rmsp, cv::INTER_LINEAR);
+        return similarity_score(proc_obs, corner);
+    }
+
+    // ---- coupled 2x2 quadratic on an (affine, rotation) pair ----
+    //      af in {x,y}, ro in {b(yaw), a(pitch)}. Works in t-units (multiples of
+    //      each axis' own base step), so the 1D reduction matches update_parabolic.
+    bool solve_pair(int af, int ro, double lambda, double trust, double eps)
+    {
+        const int afp = af, afn = af + 6;     // affine +/-
+        const int rop = ro, ron = ro + 6;     // rotation +/- (rendered)
+        if (!warps[afp].active || !warps[rop].active) return false;
+
+        const double s0   = projection.score;
+        const double sa_p = warps[afp].score, sa_n = warps[afn].score;
+        const double sb_p = warps[rop].score, sb_n = warps[ron].score;
+        const double Da = warps[afp].delta;   // px
+        const double Db = warps[rop].delta;   // rad
+        if (Da == 0.0 || Db == 0.0) return false;
+
+        // per-axis deadband
+        const double ref = (s0 > 0.0 ? s0 : 0.25*(sa_p+sa_n+sb_p+sb_n));
+        const double thr = eps * (ref > 0.0 ? ref : 1.0);
+        const bool sig_a = fabs(sa_p - sa_n) >= thr;
+        const bool sig_b = fabs(sb_p - sb_n) >= thr;
+        if (!sig_a && !sig_b) return false;                 // static -> hold
+
+        // ---- KEY: only couple when BOTH axes carry real signal. ----
+        // If just one does (slow motion: rotation is pure noise), run the exact
+        // 1D step on the active axis so noise can't leak across the cross term.
+        if (sig_a != sig_b) {
+            double step;
+            if (sig_a && parabolic_step_1d(s0, sa_p, sa_n, Da, lambda, trust, eps, step)) {
+                apply_axis_delta(af, step); return true;
+            }
+            if (sig_b && parabolic_step_1d(s0, sb_p, sb_n, Db, lambda, trust, eps, step)) {
+                apply_axis_delta(ro, step); return true;
+            }
+            return false;
+        }
+
+        // ---- both active: genuine translation+rotation regime -> 2x2 ----
+        const double ga = 0.5 * (sa_p - sa_n);
+        const double gb = 0.5 * (sb_p - sb_n);
+        const double Caa = 2.0*s0 - sa_p - sa_n;            // = -H_aa
+        const double Cbb = 2.0*s0 - sb_p - sb_n;            // = -H_bb
+        const double A = Caa + lambda, B = Cbb + lambda;
+
+        double ta, tb;
+        if (A > 1e-9 && B > 1e-9) {
+            double Cab = sa_p + sb_p - score_corner(afp, rop) - s0;  // = -H_ab
+            double det = A*B - Cab*Cab;
+            // conditioning guard: if the cross estimate is over-correlated / noisy,
+            // drop it and decouple rather than amplify through a near-singular solve.
+            if (det < 0.1 * A * B) { Cab = 0.0; det = A*B; }
+            ta = ( B*ga - Cab*gb) / det;
+            tb = (-Cab*ga +  A*gb) / det;
+        } else {
+            ta = (ga > 0 ? trust : -trust);                 // not concave -> saturate
+            tb = (gb > 0 ? trust : -trust);
+        }
+
+        if (ta >  trust) ta =  trust;  if (ta < -trust) ta = -trust;
+        if (tb >  trust) tb =  trust;  if (tb < -trust) tb = -trust;
+
+        bool moved = false;
+        if (fabs(ta) > 1e-6) { apply_axis_delta(af, ta * Da); moved = true; }
+        if (fabs(tb) > 1e-6) { apply_axis_delta(ro, tb * Db); moved = true; }
+        return moved;
+    }
+    // ---- coupled continuous update: pairs {x,yaw} {y,pitch}, z & roll stay 1D ----
+    bool update_parabolic_coupled(double lambda = 1e-3, double trust = 3.0, double eps = 0.02)
+    {
+        bool updated = false;
+        updated |= solve_pair(x, b, lambda, trust, eps);   // x  <-> yaw
+        updated |= solve_pair(y, a, lambda, trust, eps);   // y  <-> pitch
+
+        double step;
+        if (warps[zp].active && warps[zn].active &&
+            parabolic_step_1d(projection.score, warps[zp].score, warps[zn].score,
+                              warps[zp].delta, lambda, trust, eps, step)) {
+            apply_axis_delta(z, step); updated = true;
+        }
+        if (warps[cp].active && warps[cn].active &&
+            parabolic_step_1d(projection.score, warps[cp].score, warps[cn].score,
+                              warps[cp].delta, lambda, trust, eps, step)) {
+            apply_axis_delta(c, step); updated = true;
         }
         return updated;
     }
