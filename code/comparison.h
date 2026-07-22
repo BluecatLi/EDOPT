@@ -256,10 +256,8 @@ public:
         warp_history.clear();
     }
 
-    double similarity_score(const cv::Mat &O, const cv::Mat &E) {
-    double dot = cv::sum(E.mul(O))[0];
-    double ne  = cv::norm(E);              // 每个模板的能量,可缓存
-    return ne > 1e-9 ? std::max(0.0, dot / ne) : 0.0;
+double similarity_score(const cv::Mat &O, const cv::Mat &E) {
+    return cv::sum(E.mul(O))[0];
 }
 
     void score_predictive_warps()
@@ -371,67 +369,54 @@ public:
     // ---- coupled 2x2 quadratic on an (affine, rotation) pair ----
     //      af in {x,y}, ro in {b(yaw), a(pitch)}. Works in t-units (multiples of
     //      each axis' own base step), so the 1D reduction matches update_parabolic.
-    bool solve_pair(int af, int ro, double lambda, double trust, double eps)
+bool solve_pair(int af, int ro, double lambda, double trust, double eps,
+                    double *out_affine = nullptr)
     {
-        const int afp = af, afn = af + 6;     // affine +/-
-        const int rop = ro, ron = ro + 6;     // rotation +/- (rendered)
+        if (out_affine) *out_affine = 0.0;
+        const int afp = af, afn = af + 6;
+        const int rop = ro, ron = ro + 6;
         if (!warps[afp].active || !warps[rop].active) return false;
 
         const double s0   = projection.score;
         const double sa_p = warps[afp].score, sa_n = warps[afn].score;
         const double sb_p = warps[rop].score, sb_n = warps[ron].score;
-        const double Da = warps[afp].delta;   // px
-        const double Db = warps[rop].delta;   // rad
+        const double Da = warps[afp].delta, Db = warps[rop].delta;
         if (Da == 0.0 || Db == 0.0) return false;
 
-        // per-axis deadband
         const double ref = (s0 > 0.0 ? s0 : 0.25*(sa_p+sa_n+sb_p+sb_n));
         const double thr = eps * (ref > 0.0 ? ref : 1.0);
         const bool sig_a = fabs(sa_p - sa_n) >= thr;
         const bool sig_b = fabs(sb_p - sb_n) >= thr;
-        if (!sig_a && !sig_b) return false;                 // static -> hold
+        if (!sig_a && !sig_b) return false;
 
-        // ---- KEY: only couple when BOTH axes carry real signal. ----
-        // If just one does (slow motion: rotation is pure noise), run the exact
-        // 1D step on the active axis so noise can't leak across the cross term.
-        if (sig_a != sig_b) {
+        if (sig_a != sig_b) {                       // slow motion -> 1D, no leak
             double step;
             if (sig_a && parabolic_step_1d(s0, sa_p, sa_n, Da, lambda, trust, eps, step)) {
-                apply_axis_delta(af, step); return true;
+                apply_axis_delta(af, step); if (out_affine) *out_affine = step; return true;
             }
             if (sig_b && parabolic_step_1d(s0, sb_p, sb_n, Db, lambda, trust, eps, step)) {
-                apply_axis_delta(ro, step); return true;
+                apply_axis_delta(ro, step); return true;      // rotation only
             }
             return false;
         }
 
-        // ---- both active: genuine translation+rotation regime -> 2x2 ----
-        const double ga = 0.5 * (sa_p - sa_n);
-        const double gb = 0.5 * (sb_p - sb_n);
-        const double Caa = 2.0*s0 - sa_p - sa_n;            // = -H_aa
-        const double Cbb = 2.0*s0 - sb_p - sb_n;            // = -H_bb
-        const double A = Caa + lambda, B = Cbb + lambda;
-
+        const double ga = 0.5*(sa_p - sa_n), gb = 0.5*(sb_p - sb_n);
+        const double A = (2.0*s0 - sa_p - sa_n) + lambda;
+        const double B = (2.0*s0 - sb_p - sb_n) + lambda;
         double ta, tb;
         if (A > 1e-9 && B > 1e-9) {
-            double Cab = sa_p + sb_p - score_corner(afp, rop) - s0;  // = -H_ab
+            double Cab = sa_p + sb_p - score_corner(afp, rop) - s0;
             double det = A*B - Cab*Cab;
-            // conditioning guard: if the cross estimate is over-correlated / noisy,
-            // drop it and decouple rather than amplify through a near-singular solve.
-            if (det < 0.1 * A * B) { Cab = 0.0; det = A*B; }
+            if (det < 0.1*A*B) { Cab = 0.0; det = A*B; }     // conditioning guard
             ta = ( B*ga - Cab*gb) / det;
             tb = (-Cab*ga +  A*gb) / det;
-        } else {
-            ta = (ga > 0 ? trust : -trust);                 // not concave -> saturate
-            tb = (gb > 0 ? trust : -trust);
-        }
-
-        if (ta >  trust) ta =  trust;  if (ta < -trust) ta = -trust;
-        if (tb >  trust) tb =  trust;  if (tb < -trust) tb = -trust;
+        } else { ta = (ga>0?trust:-trust); tb = (gb>0?trust:-trust); }
+        if (ta> trust) ta= trust; if (ta<-trust) ta=-trust;
+        if (tb> trust) tb= trust; if (tb<-trust) tb=-trust;
 
         bool moved = false;
-        if (fabs(ta) > 1e-6) { apply_axis_delta(af, ta * Da); moved = true; }
-        if (fabs(tb) > 1e-6) { apply_axis_delta(ro, tb * Db); moved = true; }
+        if (fabs(ta) > 1e-6) { apply_axis_delta(af, ta*Da); if(out_affine)*out_affine=ta*Da; moved=true; }
+        if (fabs(tb) > 1e-6) { apply_axis_delta(ro, tb*Db); moved=true; }
         return moved;
     }
     // ---- coupled continuous update: pairs {x,yaw} {y,pitch}, z & roll stay 1D ----
@@ -454,7 +439,89 @@ public:
         }
         return updated;
     }
+// re-center projection.img_warp by a continuous step on ONE affine axis,
+    // using the same field geometry as create_m_* (assumes square proc_size).
+    // step is in warp.delta units (px for x/y; dp/W for z; rad for c).
+    void warp_projection_by_step(int axis, double step)
+    {
+        if (step == 0.0) return;
+        const double cx = proc_size.width * 0.5, cy = proc_size.height * 0.5;
+        for (int yy = 0; yy < proc_size.height; ++yy)
+            for (int xx = 0; xx < proc_size.width; ++xx) {
+                double mx = xx, my = yy;
+                switch (axis) {
+                    case x: mx = xx - step;                       break;
+                    case y: my = yy - step;                       break;
+                    case z: mx = xx + (xx-cx)*step;
+                            my = yy + (yy-cy)*step;               break;
+                    case c: mx = xx + (yy-cy)*cam[fx]/cam[fy]*step;
+                            my = yy - (xx-cx)*cam[fy]/cam[fx]*step; break;
+                    default: return;                              // a/b: render-only
+                }
+                prmx.at<float>(yy, xx) = (float)mx;
+                prmy.at<float>(yy, xx) = (float)my;
+            }
+        static cv::Mat tmp;                                       // avoid in-place remap
+        cv::remap(projection.img_warp, tmp, prmx, prmy, cv::INTER_LINEAR);
+        tmp.copyTo(projection.img_warp);
+    }
 
+    // re-score projection + affine +/-delta templates only (a/b stay frozen).
+    void score_affine()
+    {
+        projection.score = similarity_score(proc_obs, projection.img_warp);
+        if (projection.score < 0) projection.score = 0;
+        const int aff[8] = {xp,xn,yp,yn,zp,zn,cp,cn};
+        for (int i : aff)
+            if (warps[i].active) warps[i].score = similarity_score(proc_obs, warps[i].img_warp);
+    }
+
+    // 1D parabolic step on one axis; reports the applied step (warp.delta units).
+    bool solve_axis_track(int axis, double lambda, double trust, double eps, double &out_step)
+    {
+        out_step = 0.0;
+        const int p = axis, n = axis + 6;
+        if (!warps[p].active || !warps[n].active) return false;
+        double step;
+        if (!parabolic_step_1d(projection.score, warps[p].score, warps[n].score,
+                               warps[p].delta, lambda, trust, eps, step)) return false;
+        apply_axis_delta(axis, step);
+        out_step = step;
+        return true;
+    }
+
+    // Solve the frame to convergence: 1 coupled sweep (fresh render) + affine
+    // inner iterations on a re-warped projection (pitch/yaw frozen).
+    // --inner 1  ==  --cpair.
+    bool update_iterative(double lambda = 1e-3, double trust = 3.0,
+                          double eps = 0.02, int max_inner = 3)
+    {
+        bool any = false; double s;
+
+        // iter 0: full coupled sweep (scores already computed by caller).
+        if (solve_pair(x, b, lambda, trust, eps, &s)) { warp_projection_by_step(x, s); any = true; }
+        if (solve_pair(y, a, lambda, trust, eps, &s)) { warp_projection_by_step(y, s); any = true; }
+        if (solve_axis_track(z, lambda, trust, eps, s)) { warp_projection_by_step(z, s); any = true; }
+        if (solve_axis_track(c, lambda, trust, eps, s)) { warp_projection_by_step(c, s); any = true; }
+
+        // inner iters: affine block only, Jacobi update on re-centered templates.
+        for (int it = 1; it < max_inner; ++it) {
+            make_predictive_warps();        // regen x/y/z/c +/- (skips a/b)
+            score_affine();
+            double dx, dy, dz, dc; bool moved = false;
+            bool mX = solve_axis_track(x, lambda, trust, eps, dx);
+            bool mY = solve_axis_track(y, lambda, trust, eps, dy);
+            bool mZ = solve_axis_track(z, lambda, trust, eps, dz);
+            bool mC = solve_axis_track(c, lambda, trust, eps, dc);
+            if (mX) { warp_projection_by_step(x, dx); moved = true; }
+            if (mY) { warp_projection_by_step(y, dy); moved = true; }
+            if (mZ) { warp_projection_by_step(z, dz); moved = true; }
+            if (mC) { warp_projection_by_step(c, dc); moved = true; }
+            if (!moved) break;              // converged this frame
+            any = true;
+        }
+        return any;
+    }
     bool update_all_possible()
     {
         bool updated = false;

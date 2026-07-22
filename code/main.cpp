@@ -60,6 +60,8 @@ private:
     double cstep_lambda{1e-3};    // --cstep_lambda : Newton damping
     double cstep_trust{3.0};      // --cstep_trust : trust-region (x base step)
     double cstep_eps{0.02};       // --cstep_eps : relative gradient deadband
+    bool citer{false};            // --citer : in-frame affine iteration (sequential only)
+    int  inner_iters{3};          // --inner : max inner iters per frame
 
     //stats
     double toc_scarf{0}, toc_proj{0}, toc_projproc{0}, toc_warp{0};
@@ -98,6 +100,8 @@ public:
         cstep_trust = rf.check("cstep_trust", Value(3.0)).asFloat64();
         cstep_eps = rf.check("cstep_eps", Value(0.02)).asFloat64();
         cpair = rf.check("cpair") && rf.check("cpair", Value(true)).asBool();
+        citer = rf.check("citer") && rf.check("citer", Value(true)).asBool();
+        inner_iters = rf.check("inner", Value(3)).asInt32();
 
         yarp::os::Bottle& intrinsic_parameters = rf.findGroup("CAMERA_CALIBRATION");
         if (intrinsic_parameters.isNull()) {
@@ -212,10 +216,14 @@ public:
         cv::Mat img32 = scarf_handler.scarf.getSurface();
         cv::Mat img8U;
         img32.convertTo(img8U, CV_8U, 255);
-        // std::cout << "scarf min/max: " << cv::mean(img32)[0] << std::endl;
         cv::cvtColor(img8U, scarf_vis, cv::COLOR_GRAY2BGR);
         cv::resize(scarf_vis, scarf_vis, img_size);
-        cv::cvtColor(proj_rgb, proj_vis, cv::COLOR_GRAY2BGR);
+        static cv::Mat proj_snapshot;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            proj_rgb.copyTo(proj_snapshot);
+        }
+        cv::cvtColor(proj_snapshot, proj_vis, cv::COLOR_GRAY2BGR);
         vis = proj_vis + scarf_vis;
         //cv::rectangle(vis, img_handler.img_roi, cv::Scalar(255, 255, 255));
         // static cv::Mat warps_t = cv::Mat::zeros(100, 100, CV_8U);
@@ -254,7 +262,10 @@ public:
 
         if(c == 'v')
             vis_type = (++vis_type % 2);
-
+if (c == 'p') {
+    yInfo() << "object_pose = (" << state[0] << "," << state[1] << "," << state[2] << ","
+            << state[3] << "," << state[4] << "," << state[5] << "," << state[6] << ")";
+}
         // yInfo() << cv::sum(cv::sum(warp_handler.warps[predictions::z].img_warp))[0]
         //         << cv::sum(cv::sum(warp_handler.projection.img_warp))[0];
 
@@ -423,7 +434,8 @@ public:
             if(run) {
                 //updated = warp_handler.update_from_max();
                 //updated = warp_handler.update_all_possible();
-                updated = cpair ? warp_handler.update_parabolic_coupled(cstep_lambda, cstep_trust, cstep_eps)
+                updated = citer ? warp_handler.update_iterative(cstep_lambda, cstep_trust, cstep_eps, inner_iters)
+                        : cpair ? warp_handler.update_parabolic_coupled(cstep_lambda, cstep_trust, cstep_eps)
                         : cstep ? warp_handler.update_parabolic(cstep_lambda, cstep_trust, cstep_eps)
                                 : warp_handler.update_heuristically();
                 state = warp_handler.state_current;
@@ -489,9 +501,12 @@ public:
         img_handler.set_obs_rois_from_projected();
         warp_handler.scale = img_handler.scale;
 
-        img_handler.setProcProj(images[0]);
-        img_handler.proc_proj.copyTo(warp_handler.projection.img_warp);
-        proj_rgb = images[0];
+img_handler.setProcProj(images[0]);
+    img_handler.proc_proj.copyTo(warp_handler.projection.img_warp);
+    {
+        std::lock_guard<std::mutex> lk(m);
+        images[0].copyTo(proj_rgb);
+    }
 
         img_handler.setProcProj(images[1]);
         img_handler.proc_proj.copyTo(warp_handler.warps[warpManager::ap].img_warp);

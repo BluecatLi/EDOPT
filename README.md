@@ -105,8 +105,11 @@ gh auth login
 2. **Start EDOPT**
 ```bash
    cd code/build
-   ./edopt --file run_name            # add --cstep for continuous-step version
+  ./edopt --file run_cstep --cstep --cstep_trust 1.0 --cstep_eps 0.05
+  ./edopt --file run_cpair --cpair --cstep_trust 1.0 --cstep_eps 0.05
+  ./edopt --file run_citer --citer --inner 3 --cstep_trust 1.0 --cstep_eps 0.05         # add --cstep for continuous-step version
 ```
+
    - This opens the input port `/ekom/AE:i`.
    - `--file run_name` logs the pose trajectory to `run_name` (+ `run_name.mp4`).
    - Press **G** in the SCARF window to start tracking; **P** prints the
